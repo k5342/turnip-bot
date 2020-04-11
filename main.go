@@ -186,7 +186,7 @@ func restoreUserRecord(user_id string, channel_id string) (error) {
 				if err != nil {
 					return err
 				}
-				if price >= 65536 || price < 0 {
+				if !isValidPrice(price) {
 					return errors.New("Price Validation Error")
 				}
 				if record_index < 12 {
@@ -201,6 +201,13 @@ func restoreUserRecord(user_id string, channel_id string) (error) {
 		}
 	}
 	return nil
+}
+
+func isValidPrice(p int) bool {
+	if p >= 65536 || p < 0 {
+		return false
+	}
+	return true
 }
 
 func doAppendData(s *discordgo.Session, m *discordgo.MessageCreate, prefix string, args []string) {
@@ -380,7 +387,7 @@ func doAppendDataShort(s *discordgo.Session, m *discordgo.MessageCreate, prefix 
 		if erra != nil || errp != nil {
 			return
 		}
-		if price_am >= 65536 || price_pm >= 65536 || price_am < 0 || price_pm < 0 {
+		if !isValidPrice(price_am) || !isValidPrice(price_pm) {
 			return
 		}
 		errwa := saveRecord(string(m.Author.ID), record_index - 1, price_am, timeobj)
@@ -394,7 +401,7 @@ func doAppendDataShort(s *discordgo.Session, m *discordgo.MessageCreate, prefix 
 		if err != nil {
 			return
 		}
-		if price >= 65536 || price < 0 {
+		if !isValidPrice(price) {
 			return
 		}
 		err = saveRecord(string(m.Author.ID), record_index, price, timeobj)
