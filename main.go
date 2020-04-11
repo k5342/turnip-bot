@@ -8,6 +8,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"bufio"
+	"io"
+	"errors"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -40,6 +43,7 @@ func main() {
 	priceSlots = []string{
 		"Mon/AM", "Mon/PM", "Tue/AM", "Tue/PM", "Wed/AM", "Wed/PM",
 		"Thu/AM", "Thu/PM", "Fri/AM", "Fri/PM", "Sat/AM", "Sat/PM",
+		"Sun",
 	}
 	dg.AddHandler(messageHandler)
 	dg.AddHandler(userPresenceUpdateHandler)
@@ -75,7 +79,6 @@ func isContain(needle string, haystack []string) bool {
 func userPresenceUpdateHandler(s *discordgo.Session, p *discordgo.PresenceUpdate) {
 	if p.User.Username != "" {
 		// update cache
-		fmt.Println("Username changed: " + p.User.Username)
 		usernames[p.User.ID] = *p.User
 	}
 }
@@ -95,11 +98,15 @@ func doInvite(s *discordgo.Session, m *discordgo.MessageCreate, prefix string, a
 
 func showList(s *discordgo.Session, m *discordgo.MessageCreate, prefix string, args []string) {
 	user_id := m.Author.ID
+	_ = restoreUserRecord(m.Author.ID, m.ChannelID)
 	if r, ok := userRecords[user_id]; ok {
 		result := "This week: \n"
-		for i, v := range priceSlots {
+		if r.BuyingPrice > 0 {
+			result += fmt.Sprintf("BuyingPrice: %d", r.BuyingPrice)
+		}
+		for i := range r.Prices {
 			if r.Prices[i] > 0 {
-				result += fmt.Sprintf("%s: %d\n", v, r.Prices[i])
+				result += fmt.Sprintf("%s: %d\n", priceSlots[i], r.Prices[i])
 			}
 		}
 		sendReply(s, m, result)
@@ -136,6 +143,66 @@ func saveRecord(user_id string, record_index int, price int, ts time.Time) error
 	return nil
 }
 
+func restoreUserRecord(user_id string, channel_id string) (error) {
+	ts, err := getChannelLocalTime(time.Now(), channel_id)
+	if err != nil {
+		return err
+	}
+	ts_week_current := getLastSunday(ts).Format("2006-01-02")
+	f, err := os.Open("./record-log.csv")
+	if err != nil {
+		return err
+	}
+	
+	reader := bufio.NewReaderSize(f, 2048)
+	for {
+		line, err := reader.ReadString('\n')
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		line = strings.TrimRight(line, "\n")
+		c := strings.Split(line, "\t")
+		if c[0] != user_id {
+			continue
+		}
+		ts_week := c[3]
+		if err != nil {
+			return err
+		}
+		fmt.Println(ts_week_current)
+		fmt.Println(ts_week)
+		fmt.Println(line)
+		if ts_week_current == ts_week {
+			record_index, err := strconv.Atoi(c[1])
+			if err != nil {
+				return err
+			}
+			if record_index >= 0 && record_index <= 12 {
+				r := new(UserRecord)
+				price, err := strconv.Atoi(c[2])
+				if err != nil {
+					return err
+				}
+				if price >= 65536 || price < 0 {
+					return errors.New("Price Validation Error")
+				}
+				if record_index < 12 {
+					r.Prices[record_index] = uint16(price)
+				} else {
+					r.BuyingPrice = uint16(price)
+				}
+				userRecords[user_id] = r
+			} else {
+				continue
+			}
+		}
+	}
+	return nil
+}
+
 func doAppendData(s *discordgo.Session, m *discordgo.MessageCreate, prefix string, args []string) {
 	if checkInvited(s, m) != true {
 		return
@@ -157,7 +224,7 @@ func doAppendData(s *discordgo.Session, m *discordgo.MessageCreate, prefix strin
 		var record_index int
 		if len(args) == 1 {
 			// auto complete wday and time
-			record_index, err := getCurrentTime(m)
+			record_index, err := getRecordIndex(m)
 			if err != nil {
 				sendReply(s, m, fmt.Sprintf("add: cannot detect current time"))
 				return
@@ -218,7 +285,7 @@ func doAppendData(s *discordgo.Session, m *discordgo.MessageCreate, prefix strin
 	}
 }
 
-func getCurrentTime(m *discordgo.MessageCreate) (int, error) {
+func getRecordIndex(m *discordgo.MessageCreate) (int, error) {
 	timeobj, err := parseLocalTime(m)
 	if err != nil {
 		return -1, err
@@ -237,15 +304,35 @@ func parseLocalTime(m *discordgo.MessageCreate) (time.Time, error) {
 	if err != nil {
 		return time.Now(), err
 	}
-	if channelTZcache[m.ChannelID] == nil {
-		return timeobj.In(time.Local), nil
+	return getChannelLocalTime(timeobj, m.ChannelID)
+}
+
+func getChannelLocalTime(t time.Time, channel_id string) (time.Time, error) {
+	if channelTZcache[channel_id] == nil {
+		return t.In(time.Local), nil
 	} else {
-		return timeobj.In(channelTZcache[m.ChannelID]), nil
+		return t.In(channelTZcache[channel_id]), nil
 	}
 }
 
 func getLastSunday(ts time.Time) time.Time {
-	return ts.AddDate(0, 0, -((int(ts.Weekday()) + 6) % 7) - 1)
+	switch ts.Weekday() {
+	case time.Sunday:
+		return ts
+	case time.Monday:
+		return ts.AddDate(0, 0, -1)
+	case time.Tuesday:
+		return ts.AddDate(0, 0, -2)
+	case time.Wednesday:
+		return ts.AddDate(0, 0, -3)
+	case time.Thursday:
+		return ts.AddDate(0, 0, -4)
+	case time.Friday:
+		return ts.AddDate(0, 0, -5)
+	case time.Saturday:
+		return ts.AddDate(0, 0, -6)
+	}
+	return time.Now()
 }
 
 func setTimezone(s *discordgo.Session, m *discordgo.MessageCreate, prefix string, args []string) {
@@ -277,7 +364,7 @@ func doAppendDataShort(s *discordgo.Session, m *discordgo.MessageCreate, prefix 
 	}
 	// auto complete wday and time
 	timeobj, err1 := parseLocalTime(m)
-	record_index, err2 := getCurrentTime(m)
+	record_index, err2 := getRecordIndex(m)
 	if err1 != nil && err2 != nil {
 		sendReply(s, m, fmt.Sprintf("add: cannot detect current time"))
 		return
@@ -293,7 +380,7 @@ func doAppendDataShort(s *discordgo.Session, m *discordgo.MessageCreate, prefix 
 		if erra != nil || errp != nil {
 			return
 		}
-		if price_am >= 65536 || price_pm >= 65536 || price_am <= 0 || price_pm <= 0 {
+		if price_am >= 65536 || price_pm >= 65536 || price_am < 0 || price_pm < 0 {
 			return
 		}
 		errwa := saveRecord(string(m.Author.ID), record_index - 1, price_am, timeobj)
@@ -307,7 +394,7 @@ func doAppendDataShort(s *discordgo.Session, m *discordgo.MessageCreate, prefix 
 		if err != nil {
 			return
 		}
-		if price >= 65536 || price <= 0 {
+		if price >= 65536 || price < 0 {
 			return
 		}
 		err = saveRecord(string(m.Author.ID), record_index, price, timeobj)
@@ -320,7 +407,7 @@ func doAppendDataShort(s *discordgo.Session, m *discordgo.MessageCreate, prefix 
 
 func showUsage(s *discordgo.Session, m *discordgo.MessageCreate, prefix string, args []string) {
 	localtime, errlt := parseLocalTime(m)
-	price_index, errct := getCurrentTime(m)
+	price_index, errct := getRecordIndex(m)
 	if errlt == nil && errct == nil {
 		replyStr := "\n" + 
 			fmt.Sprintf("Current Time: **%s (%s)**\n", localtime.String(), getLabelFromPriceIndex(price_index)) +
